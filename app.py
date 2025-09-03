@@ -1,3 +1,5 @@
+# app.py
+
 import io
 import sys
 import warnings
@@ -15,7 +17,7 @@ import streamlit as st
 # Page config
 # -----------------------------
 st.set_page_config(
-    page_title="Performance Evaluator",
+    page_title="เครื่องมือประเมินประสิทธิภาพ",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -273,7 +275,7 @@ def heatmap_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 def add_topn_bar(df: pd.DataFrame, metric: str, top_n: int, title: str):
     if df.empty or metric not in df.columns:
-        st.info("No data to display.")
+        st.info("ไม่มีข้อมูลที่จะแสดง")
         return
     show = df.dropna(subset=[metric]).sort_values(metric, ascending=False).head(top_n)
     fig = px.bar(show, x="Name", y=metric, hover_data=["Employee ID"], title=title)
@@ -283,11 +285,11 @@ def add_topn_bar(df: pd.DataFrame, metric: str, top_n: int, title: str):
 
 def kpi_block(total_works, total_hours, avg_wph, employees, days):
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Works", f"{int(total_works):,}")
-    c2.metric("Total Hours", f"{int(total_hours):,}")
-    c3.metric("Avg WPH", f"{avg_wph:,.2f}" if not np.isnan(avg_wph) else "—")
-    c4.metric("# Employees", f"{employees:,}")
-    c5.metric("# Days", f"{days:,}")
+    c1.metric("งานทั้งหมด", f"{int(total_works):,}")
+    c2.metric("ชั่วโมงทั้งหมด", f"{int(total_hours):,}")
+    c3.metric("งานต่อชั่วโมง (เฉลี่ย)", f"{avg_wph:,.2f}" if not np.isnan(avg_wph) else "—")
+    c4.metric("จำนวนพนักงาน", f"{employees:,}")
+    c5.metric("จำนวนวัน", f"{days:,}")
 
 
 def download_csv_button(df: pd.DataFrame, filename: str, label: str):
@@ -298,52 +300,52 @@ def download_csv_button(df: pd.DataFrame, filename: str, label: str):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("📈 Performance Evaluator")
+st.title("📈 เครื่องมือประเมินประสิทธิภาพ")
 
 st.markdown(
     """
-Upload 1 or more CSV files with the following columns:
-- **Time (day)** (date)  
-- **Hour** (0–23)  
-- **Employee ID**  
-- **Name**  
-- **Processed Count**  
+อัปโหลดไฟล์ CSV 1 ไฟล์หรือมากกว่า โดยต้องมีคอลัมน์ดังต่อไปนี้:
+- **Time (day)** (วันที่)
+- **Hour** (ชั่วโมง, 0–23)
+- **Employee ID** (รหัสพนักงาน)
+- **Name** (ชื่อพนักงาน)
+- **Processed Count** (จำนวนงานที่ทำ)
 
-The app auto-normalizes similar column names (e.g., `Date`→`Time (day)`, `Processed`→`Processed Count`).
+แอปพลิเคชันจะพยายามปรับชื่อคอลัมน์ที่คล้ายกันให้เป็นมาตรฐานโดยอัตโนมัติ (เช่น `Date`→`Time (day)`, `Processed`→`Processed Count`)
 """
 )
 
 with st.sidebar:
-    st.header("⚙️ Settings")
-    st.caption("How to count a worked hour?")
+    st.header("⚙️ การตั้งค่า")
+    st.caption("จะนับชั่วโมงทำงานอย่างไร?")
     hour_count_mode = st.radio(
-        "Hours are counted when…",
+        "นับชั่วโมงเมื่อ…",
         options=[
-            "Processed Count > 0 (recommended)",
-            "Any row exists (even if Processed Count = 0)",
+            "มีข้อมูล Processed Count > 0 (แนะนำ)",
+            "มีแถวข้อมูลอยู่ (แม้ Processed Count = 0)",
         ],
         index=0,
     )
-    count_when_gt_zero = hour_count_mode.startswith("Processed")
+    count_when_gt_zero = hour_count_mode.startswith("มีข้อมูล")
 
-    min_hours_threshold = st.slider("Min hours to include in WPH leaderboards", 1, 40, 8, 1)
-    top_n = st.slider("Top N to display in leaderboards", 3, 50, 10, 1)
-
-    st.divider()
-    st.caption("Optional filters")
-    date_filter_on = st.checkbox("Filter by date range", value=False)
-    employee_search = st.text_input("Search name contains (optional)", value="")
+    min_hours_threshold = st.slider("ชั่วโมงทำงานขั้นต่ำเพื่อแสดงในลีดเดอร์บอร์ด WPH", 1, 40, 8, 1)
+    top_n = st.slider("จำนวนอันดับสูงสุดที่จะแสดง", 3, 50, 10, 1)
 
     st.divider()
-    st.caption("Data options")
-    use_sample = st.checkbox("Use sample data (if you don't have files yet)", value=False)
+    st.caption("ตัวกรอง (เลือกได้)")
+    date_filter_on = st.checkbox("กรองตามช่วงวันที่", value=False)
+    employee_search = st.text_input("ค้นหาชื่อพนักงาน (ไม่บังคับ)", value="")
+
+    st.divider()
+    st.caption("ตัวเลือกข้อมูล")
+    use_sample = st.checkbox("ใช้ข้อมูลตัวอย่าง (หากยังไม่มีไฟล์)", value=False)
 
 
 # -----------------------------
 # Load data
 # -----------------------------
 uploaded_files = st.file_uploader(
-    "Drop CSV files here",
+    "วางไฟล์ CSV ที่นี่",
     type=["csv"],
     accept_multiple_files=True,
 )
@@ -386,24 +388,24 @@ for f in uploaded_files or []:
         dfs.append(df0)
         issues_all += issues
     except Exception as e:
-        st.error(f"Failed to read {getattr(f, 'name', 'file')}: {e}")
+        st.error(f"ไม่สามารถอ่านไฟล์ {getattr(f, 'name', 'file')}: {e}")
 
 if not dfs:
-    st.info("👆 Upload CSVs or enable **Use sample data** in the sidebar to get started.")
+    st.info("👆 อัปโหลดไฟล์ CSV หรือเปิดใช้งาน **ใช้ข้อมูลตัวอย่าง** ในแถบด้านข้างเพื่อเริ่มต้น")
     st.stop()
 
 df = pd.concat(dfs, ignore_index=True)
 
 # Report issues (if any)
 if issues_all:
-    with st.expander("Data quality notes"):
+    with st.expander("ข้อสังเกตเกี่ยวกับคุณภาพข้อมูล"):
         for msg in issues_all:
             st.warning(msg)
 
 # Basic validation
 missing_cols = [c for c in REQUIRED_COLS if c not in df.columns]
 if missing_cols:
-    st.error(f"Cannot proceed: missing required columns: {missing_cols}")
+    st.error(f"ไม่สามารถดำเนินการต่อได้: ไม่มีคอลัมน์ที่จำเป็น: {missing_cols}")
     st.stop()
 
 # Optional filters
@@ -411,7 +413,7 @@ if date_filter_on and "Time (day)" in df.columns:
     min_d = pd.to_datetime(df["Time (day)"]).min()
     max_d = pd.to_datetime(df["Time (day)"]).max()
     d1, d2 = st.slider(
-        "Date range",
+        "ช่วงวันที่",
         min_value=min_d.to_pydatetime().date(),
         max_value=max_d.to_pydatetime().date(),
         value=(min_d.to_pydatetime().date(), max_d.to_pydatetime().date()),
@@ -437,141 +439,141 @@ avg_wph = total_works / total_hours if total_hours > 0 else np.nan
 employees = emp_summary.shape[0]
 days = emp_daily["Time (day)"].nunique() if "Time (day)" in emp_daily.columns else 0
 
-st.subheader("Overview")
+st.subheader("ภาพรวม")
 kpi_block(total_works, total_hours, avg_wph, employees, days)
 
-with st.expander("Raw data preview", expanded=False):
+with st.expander("ตัวอย่างข้อมูลดิบ", expanded=False):
     st.dataframe(df.head(100))
 
 st.divider()
 
 # Tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    ["🏆 Leaderboards", "📅 Time Analysis", "👤 Employee Drilldown", "⚠️ Anomalies", "📊 Pivots", "📥 Export"]
+    ["🏆 ลีดเดอร์บอร์ด", "📅 การวิเคราะห์ตามเวลา", "👤 ข้อมูลพนักงานรายบุคคล", "⚠️ ข้อมูลผิดปกติ", "📊 ตารางสรุป (Pivot)", "📥 ส่งออกข้อมูล"]
 )
 
 with tab1:
-    st.subheader("Leaderboards")
-    st.caption(f"Using min-hours threshold = **{min_hours_threshold}** for WPH.")
+    st.subheader("ลีดเดอร์บอร์ด")
+    st.caption(f"ใช้เกณฑ์ชั่วโมงทำงานขั้นต่ำ **{min_hours_threshold}** ชั่วโมงสำหรับ WPH")
     if not emp_summary.empty:
         # Apply min-hours for WPH
         eligible = emp_summary[emp_summary["Hours"] >= min_hours_threshold].copy()
         col1, col2, col3 = st.columns(3, gap="large")
         with col1:
-            add_topn_bar(emp_summary, "Works", top_n, "Top by Works (Total Processed)")
+            add_topn_bar(emp_summary, "Works", top_n, "อันดับสูงสุดตามจำนวนงานทั้งหมด")
         with col2:
             if eligible.empty:
-                st.info("No employees meet the min-hours threshold for WPH ranking.")
+                st.info("ไม่มีพนักงานที่ผ่านเกณฑ์ชั่วโมงทำงานขั้นต่ำสำหรับการจัดอันดับ WPH")
             else:
-                add_topn_bar(eligible, "WPH", top_n, "Top by Works per Hour (WPH)")
+                add_topn_bar(eligible, "WPH", top_n, "อันดับสูงสุดตามงานต่อชั่วโมง (WPH)")
         with col3:
-            add_topn_bar(emp_summary, "Hours", top_n, "Top by Hours Worked")
+            add_topn_bar(emp_summary, "Hours", top_n, "อันดับสูงสุดตามชั่วโมงทำงาน")
 
         st.markdown("---")
-        st.subheader("Bottom by WPH (with min-hours threshold)")
+        st.subheader("อันดับต่ำสุดตาม WPH (ตามเกณฑ์ชั่วโมงทำงานขั้นต่ำ)")
         if not eligible.empty:
             bottom = eligible.sort_values("WPH", ascending=True).head(top_n)
-            fig = px.bar(bottom, x="Name", y="WPH", hover_data=["Employee ID"], title="Bottom by WPH")
+            fig = px.bar(bottom, x="Name", y="WPH", hover_data=["Employee ID"], title="อันดับต่ำสุดตาม WPH")
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(bottom.reset_index(drop=True))
         else:
-            st.info("No eligible employees for bottom WPH.")
+            st.info("ไม่มีพนักงานที่เข้าเกณฑ์สำหรับอันดับต่ำสุดตาม WPH")
 
 with tab2:
-    st.subheader("Time Analysis")
+    st.subheader("การวิเคราะห์ตามเวลา")
     if emp_hourly.empty:
-        st.info("Not enough data for time analysis.")
+        st.info("ข้อมูลไม่เพียงพอสำหรับการวิเคราะห์ตามเวลา")
     else:
         # Hour-of-day throughput
         hourly = emp_hourly.groupby("Hour", as_index=False)["Processed Count"].sum()
-        fig1 = px.line(hourly, x="Hour", y="Processed Count", markers=True, title="Throughput by Hour of Day")
+        fig1 = px.line(hourly, x="Hour", y="Processed Count", markers=True, title="ปริมาณงานในแต่ละชั่วโมงของวัน")
         st.plotly_chart(fig1, use_container_width=True)
 
         # Day-of-week & hour heatmaps
         thr, cov = heatmap_data(emp_hourly)
         if not thr.empty:
-            st.markdown("**Throughput Heatmap (Day-of-Week × Hour)**")
-            fig2 = px.imshow(thr, aspect="auto", title="Throughput Heatmap", labels=dict(color="Works"))
+            st.markdown("**แผนที่ความร้อนของปริมาณงาน (วันในสัปดาห์ × ชั่วโมง)**")
+            fig2 = px.imshow(thr, aspect="auto", title="แผนที่ความร้อนของปริมาณงาน", labels=dict(color="จำนวนงาน"))
             st.plotly_chart(fig2, use_container_width=True)
 
         if not cov.empty:
-            st.markdown("**Staffing Coverage Heatmap (Unique Employees Working)**")
-            fig3 = px.imshow(cov, aspect="auto", title="Coverage Heatmap", labels=dict(color="# Employees"))
+            st.markdown("**แผนที่ความร้อนของการเข้าทำงาน (จำนวนพนักงานที่ไม่ซ้ำกัน)**")
+            fig3 = px.imshow(cov, aspect="auto", title="แผนที่ความร้อนของการเข้าทำงาน", labels=dict(color="จำนวนพนักงาน"))
             st.plotly_chart(fig3, use_container_width=True)
 
         # Daily totals
         daily_total = emp_daily.groupby("Time (day)", as_index=False)["Works"].sum()
-        fig4 = px.bar(daily_total, x="Time (day)", y="Works", title="Daily Total Works")
+        fig4 = px.bar(daily_total, x="Time (day)", y="Works", title="ยอดรวมงานรายวัน")
         st.plotly_chart(fig4, use_container_width=True)
 
         # Peak hours table
-        st.markdown("**Top Hours by Throughput**")
+        st.markdown("**ชั่วโมงที่มีปริมาณงานสูงสุด**")
         peak_hours = (
             emp_hourly.groupby("Hour", as_index=False)["Processed Count"].sum().sort_values("Processed Count", ascending=False)
         )
         st.dataframe(peak_hours.head(24))
 
 with tab3:
-    st.subheader("Employee Drilldown")
+    st.subheader("ข้อมูลพนักงานรายบุคคล")
     if emp_summary.empty:
-        st.info("No employee data.")
+        st.info("ไม่มีข้อมูลพนักงาน")
     else:
         names = emp_summary["Name"].tolist()
-        picked = st.selectbox("Choose an employee", options=names)
+        picked = st.selectbox("เลือกพนักงาน", options=names)
         if picked:
             # Determine the employee ID (in case of duplicate names, show all matches)
             emp_ids = emp_summary.loc[emp_summary["Name"] == picked, "Employee ID"].unique().tolist()
             if len(emp_ids) > 1:
-                emp_id = st.selectbox("Multiple IDs found for this name. Pick one:", options=emp_ids)
+                emp_id = st.selectbox("พบหลาย ID สำหรับชื่อนี้ กรุณาเลือกหนึ่งรายการ:", options=emp_ids)
             else:
                 emp_id = emp_ids[0]
 
             dfd = emp_daily[(emp_daily["Name"] == picked) & (emp_daily["Employee ID"] == emp_id)].copy()
             if dfd.empty:
-                st.info("No daily records for selection.")
+                st.info("ไม่พบข้อมูลรายวันสำหรับพนักงานที่เลือก")
             else:
                 c1, c2, c3 = st.columns(3)
                 works_total = int(dfd["Works"].sum())
                 hours_total = int(dfd["Hours"].sum())
                 wph = works_total / hours_total if hours_total > 0 else np.nan
-                c1.metric("Works (Total)", f"{works_total:,}")
-                c2.metric("Hours (Total)", f"{hours_total:,}")
-                c3.metric("WPH (Overall)", f"{wph:,.2f}" if not np.isnan(wph) else "—")
+                c1.metric("งานทั้งหมด", f"{works_total:,}")
+                c2.metric("ชั่วโมงทั้งหมด", f"{hours_total:,}")
+                c3.metric("WPH (โดยรวม)", f"{wph:,.2f}" if not np.isnan(wph) else "—")
 
-                fig = px.line(dfd, x="Time (day)", y="Works", markers=True, title=f"Daily Works — {picked}")
+                fig = px.line(dfd, x="Time (day)", y="Works", markers=True, title=f"ปริมาณงานรายวัน — {picked}")
                 st.plotly_chart(fig, use_container_width=True)
 
-                fig_wph = px.line(dfd, x="Time (day)", y="WPH", markers=True, title=f"Daily WPH — {picked}")
+                fig_wph = px.line(dfd, x="Time (day)", y="WPH", markers=True, title=f"WPH รายวัน — {picked}")
                 st.plotly_chart(fig_wph, use_container_width=True)
 
                 # Hourly profile of this employee
                 base = emp_hourly[(emp_hourly["Name"] == picked) & (emp_hourly["Employee ID"] == emp_id)].copy()
                 prof = base.groupby("Hour", as_index=False)["Processed Count"].sum()
-                fig_prof = px.bar(prof, x="Hour", y="Processed Count", title=f"Hourly Profile — {picked}")
+                fig_prof = px.bar(prof, x="Hour", y="Processed Count", title=f"โปรไฟล์รายชั่วโมง — {picked}")
                 st.plotly_chart(fig_prof, use_container_width=True)
 
-                st.markdown("**Records (daily)**")
+                st.markdown("**บันทึกข้อมูล (รายวัน)**")
                 st.dataframe(dfd.sort_values("Time (day)"))
 
 with tab4:
-    st.subheader("Anomalies")
+    st.subheader("ข้อมูลผิดปกติ")
     if emp_daily.empty:
-        st.info("No data for anomaly detection.")
+        st.info("ไม่มีข้อมูลสำหรับตรวจหาความผิดปกติ")
     else:
-        z_thr = st.slider("Z-score threshold", 1.0, 4.0, 2.0, 0.5)
+        z_thr = st.slider("เกณฑ์ Z-score", 1.0, 4.0, 2.0, 0.5)
         anom = anomaly_report(emp_daily, z_threshold=z_thr)
         flagged = anom[anom["IsAnomaly"]].copy()
-        st.caption("An anomaly is a day where an employee's daily 'Works' deviates from their own mean by >= threshold standard deviations.")
+        st.caption("ข้อมูลผิดปกติคือวันที่ 'จำนวนงาน' ประจำวันของพนักงานเบี่ยงเบนไปจากค่าเฉลี่ยของตนเอง มากกว่าหรือเท่ากับค่า Z-score ที่กำหนด")
         st.dataframe(flagged.sort_values(["Name", "Time (day)"]))
         if not flagged.empty:
             by_emp = flagged.groupby("Name").size().reset_index(name="Anomaly Days")
-            fig = px.bar(by_emp, x="Name", y="Anomaly Days", title="Anomaly Counts by Employee")
+            fig = px.bar(by_emp, x="Name", y="Anomaly Days", title="จำนวนวันที่ผิดปกติของพนักงานแต่ละคน")
             st.plotly_chart(fig, use_container_width=True)
 
 with tab5:
-    st.subheader("Pivots")
+    st.subheader("ตารางสรุป (Pivot)")
     if emp_hourly.empty:
-        st.info("No data for pivots.")
+        st.info("ไม่มีข้อมูลสำหรับสร้างตารางสรุป")
     else:
         # Daily x Employee pivot of Works
         piv = (
@@ -579,7 +581,7 @@ with tab5:
             .pivot_table(index="Time (day)", columns="Name", values="Processed Count", aggfunc="sum")
             .fillna(0)
         )
-        st.markdown("**Daily × Employee — Works**")
+        st.markdown("**รายวัน × พนักงาน — จำนวนงาน**")
         st.dataframe(piv)
 
         # Hour x Employee pivot (sum)
@@ -588,22 +590,22 @@ with tab5:
             .pivot_table(index="Hour", columns="Name", values="Processed Count", aggfunc="sum")
             .fillna(0)
         )
-        st.markdown("**Hour × Employee — Works**")
+        st.markdown("**รายชั่วโมง × พนักงาน — จำนวนงาน**")
         st.dataframe(piv2)
 
 with tab6:
-    st.subheader("Export")
-    st.caption("Download aggregated tables as CSV.")
+    st.subheader("ส่งออกข้อมูล")
+    st.caption("ดาวน์โหลดตารางสรุปเป็นไฟล์ CSV")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        download_csv_button(emp_summary, "employee_summary.csv", "⬇️ Employee Summary (per employee)")
+        download_csv_button(emp_summary, "employee_summary.csv", "⬇️ สรุปข้อมูลพนักงาน (รายบุคคล)")
     with c2:
-        download_csv_button(emp_daily, "employee_daily.csv", "⬇️ Daily Aggregates (per employee per day)")
+        download_csv_button(emp_daily, "employee_daily.csv", "⬇️ สรุปข้อมูลรายวัน (รายบุคคลต่อวัน)")
     with c3:
-        download_csv_button(emp_hourly, "employee_hourly.csv", "⬇️ Granular Hourly Records")
+        download_csv_button(emp_hourly, "employee_hourly.csv", "⬇️ บันทึกข้อมูลรายชั่วโมง")
 
     st.markdown("---")
-    st.markdown("**Tip:** Store these CSVs for audit and monthly reviews.")
+    st.markdown("**เคล็ดลับ:** จัดเก็บไฟล์ CSV เหล่านี้เพื่อการตรวจสอบและสรุปผลประจำเดือน")
 
-st.caption("Built with ❤️ — drop in more CSVs anytime to refresh the dashboards.")
+st.caption("สร้างด้วย ❤️ — สามารถวางไฟล์ CSV เพิ่มเติมได้ตลอดเวลาเพื่อรีเฟรชแดชบอร์ด")
