@@ -1,4 +1,3 @@
-python
 import io
 import sys
 import warnings
