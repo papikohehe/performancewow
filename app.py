@@ -90,7 +90,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, List[str]]:
-    """Ensure required columns exist and coerce dtypes, handling special date logic."""
+    """Ensure required columns exist and coerce dtypes, with improved date logic."""
     issues = []
     df = normalize_columns(df.copy())
 
@@ -102,34 +102,52 @@ def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, L
     if missing:
         issues.append(f"Missing columns: {missing}")
 
-    # Coerce Time (day)
+    # --- FIXED Date Handling Logic ---
     if "Time (day)" in df.columns:
-        # First, try to parse dates directly. This works for standard date formats.
-        try:
-            processed_dates = pd.to_datetime(df["Time (day)"], errors="coerce")
-        except Exception:
-            processed_dates = pd.Series([pd.NaT] * len(df))
+        reconstructed_from_filename = False
+        
+        # Attempt to reconstruct from filename if data looks like day numbers (1-31)
+        day_numbers = pd.to_numeric(df["Time (day)"], errors='coerce')
+        is_likely_day_numbers = (
+            day_numbers.notna().all() 
+            and day_numbers.min() >= 1 
+            and day_numbers.max() <= 31
+        )
 
-        # If direct parsing fails (e.g., column contains day numbers), try to build from filename
-        if processed_dates.isna().all():
+        if is_likely_day_numbers:
             match = re.search(r"(\d{4})-(\d{2})", filename)
             if match:
                 year, month = match.groups()
-                day_col = pd.to_numeric(df["Time (day)"], errors="coerce")
-                
-                # Construct date strings and then convert
-                date_str = day_col.apply(lambda d: f"{year}-{month}-{int(d):02d}" if pd.notna(d) else None)
-                processed_dates = pd.to_datetime(date_str, errors="coerce")
-                
-                if processed_dates.isna().any():
-                     issues.append("Some dates could not be constructed from the filename and 'Time (day)' column.")
+                try:
+                    # Construct datetime objects from components
+                    df['Time (day)'] = pd.to_datetime(
+                        {'year': int(year), 'month': int(month), 'day': day_numbers}
+                    )
+                    reconstructed_from_filename = True
+                except Exception as e:
+                    issues.append(f"Error building date from filename: {e}")
             else:
-                issues.append("Could not parse 'Time (day)' and no YYYY-MM pattern found in filename to construct dates.")
-                processed_dates = pd.Series([pd.NaT] * len(df))
+                issues.append("Data looks like day numbers, but no YYYY-MM pattern found in filename.")
 
-        # Final conversion to date object, ignoring time part
-        df["Time (day)"] = processed_dates.dt.date
 
+        # If not reconstructed from filename (e.g., sample data), try direct parsing
+        if not reconstructed_from_filename:
+            try:
+                processed_dates = pd.to_datetime(df["Time (day)"], errors="coerce")
+                if processed_dates.isna().all():
+                    issues.append("Failed to parse 'Time (day)' as dates.")
+                    df['Time (day)'] = pd.NaT
+                else:
+                    df['Time (day)'] = processed_dates
+            except Exception as e:
+                issues.append(f"An error occurred while parsing dates: {e}")
+                df['Time (day)'] = pd.NaT
+
+        # Final conversion to date object (if not NaT)
+        if pd.api.types.is_datetime64_any_dtype(df["Time (day)"]):
+            df["Time (day)"] = df["Time (day)"].dt.date
+        else:
+            df["Time (day)"] = pd.NaT # Ensure column is consistent type on failure
 
     # Coerce Hour to int 0-23 where possible
     if "Hour" in df.columns:
