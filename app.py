@@ -1,6 +1,7 @@
 # app.py
 
 import io
+import re
 import sys
 import warnings
 from dataclasses import dataclass
@@ -88,10 +89,14 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def coerce_schema(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
-    """Ensure required columns exist and coerce dtypes."""
+def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, List[str]]:
+    """Ensure required columns exist and coerce dtypes, handling special date logic."""
     issues = []
     df = normalize_columns(df.copy())
+
+    # Filter out records where Name is "-"
+    if "Name" in df.columns:
+        df = df[df["Name"] != "-"].copy()
 
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
@@ -99,17 +104,38 @@ def coerce_schema(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
 
     # Coerce Time (day)
     if "Time (day)" in df.columns:
+        # First, try to parse dates directly. This works for standard date formats.
         try:
-            df["Time (day)"] = pd.to_datetime(df["Time (day)"], errors="coerce").dt.date
-        except Exception as e:
-            issues.append(f"Failed to parse 'Time (day)' as dates: {e}")
-            df["Time (day)"] = pd.NaT
+            processed_dates = pd.to_datetime(df["Time (day)"], errors="coerce")
+        except Exception:
+            processed_dates = pd.Series([pd.NaT] * len(df))
+
+        # If direct parsing fails (e.g., column contains day numbers), try to build from filename
+        if processed_dates.isna().all():
+            match = re.search(r"(\d{4})-(\d{2})", filename)
+            if match:
+                year, month = match.groups()
+                day_col = pd.to_numeric(df["Time (day)"], errors="coerce")
+                
+                # Construct date strings and then convert
+                date_str = day_col.apply(lambda d: f"{year}-{month}-{int(d):02d}" if pd.notna(d) else None)
+                processed_dates = pd.to_datetime(date_str, errors="coerce")
+                
+                if processed_dates.isna().any():
+                     issues.append("Some dates could not be constructed from the filename and 'Time (day)' column.")
+            else:
+                issues.append("Could not parse 'Time (day)' and no YYYY-MM pattern found in filename to construct dates.")
+                processed_dates = pd.Series([pd.NaT] * len(df))
+
+        # Final conversion to date object, ignoring time part
+        df["Time (day)"] = processed_dates.dt.date
+
 
     # Coerce Hour to int 0-23 where possible
     if "Hour" in df.columns:
         def _to_hour(x):
             try:
-                # Handle "09", "9", "9:00"
+                # Handle "09", "9", "9:00", "09:00"
                 s = str(x).strip()
                 if ":" in s:
                     s = s.split(":")[0]
@@ -121,12 +147,10 @@ def coerce_schema(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
             return np.nan
 
         df["Hour"] = df["Hour"].apply(_to_hour)
-        # If hour strings like "24" appear, clamp to 23
-        df.loc[df["Hour"].isna(), "Hour"] = np.nan
 
     # Employee ID as string
     if "Employee ID" in df.columns:
-        df["Employee ID"] = df["Employee ID"].astype(str)
+        df["Employee ID"] = df["Employee ID"].astype(str).str.replace(r'\.0$', '', regex=True)
 
     # Name as string
     if "Name" in df.columns:
@@ -136,7 +160,7 @@ def coerce_schema(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     if "Processed Count" in df.columns:
         df["Processed Count"] = pd.to_numeric(df["Processed Count"], errors="coerce")
         neg = (df["Processed Count"] < 0).sum()
-        if neg:
+        if neg > 0:
             issues.append(f"{neg} rows had negative 'Processed Count' and were set to 0.")
         df["Processed Count"] = df["Processed Count"].fillna(0)
         df.loc[df["Processed Count"] < 0, "Processed Count"] = 0
@@ -247,7 +271,9 @@ def heatmap_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         return pd.DataFrame(), pd.DataFrame()
 
     tmp = df.copy()
-    tmp["Dow"] = pd.to_datetime(tmp["Time (day)"]).dt.day_name()
+    # Ensure 'Time (day)' is in datetime format for dt accessor
+    tmp['Time (day)'] = pd.to_datetime(tmp['Time (day)'])
+    tmp["Dow"] = tmp["Time (day)"].dt.day_name()
 
     # Throughput by hour x day-of-week
     thr = (
@@ -268,8 +294,8 @@ def heatmap_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     )
     # Sort DOW in conventional order
     dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    thr = thr.reindex(dow_order)
-    cov = cov.reindex(dow_order)
+    thr = thr.reindex(dow_order).fillna(0)
+    cov = cov.reindex(dow_order).fillna(0)
     return thr, cov
 
 
@@ -375,7 +401,7 @@ if use_sample and not uploaded_files:
                     cnt = 0
                 rows.append([d, h, eid, nm, cnt])
     sample = pd.DataFrame(rows, columns=REQUIRED_COLS)
-    df0, issues = coerce_schema(sample)
+    df0, issues = coerce_schema(sample, filename="sample-2025-08.csv")
     df0 = deduplicate_rows(df0)
     dfs.append(df0)
     issues_all += issues
@@ -383,7 +409,8 @@ if use_sample and not uploaded_files:
 for f in uploaded_files or []:
     try:
         raw = read_csv_safely(f)
-        df0, issues = coerce_schema(raw)
+        filename = getattr(f, 'name', '')
+        df0, issues = coerce_schema(raw, filename=filename)
         df0 = deduplicate_rows(df0)
         dfs.append(df0)
         issues_all += issues
@@ -399,7 +426,7 @@ df = pd.concat(dfs, ignore_index=True)
 # Report issues (if any)
 if issues_all:
     with st.expander("ข้อสังเกตเกี่ยวกับคุณภาพข้อมูล"):
-        for msg in issues_all:
+        for msg in set(issues_all):
             st.warning(msg)
 
 # Basic validation
@@ -408,19 +435,22 @@ if missing_cols:
     st.error(f"ไม่สามารถดำเนินการต่อได้: ไม่มีคอลัมน์ที่จำเป็น: {missing_cols}")
     st.stop()
 
+# Drop rows with invalid dates before proceeding
+df.dropna(subset=['Time (day)'], inplace=True)
+
+
 # Optional filters
-if date_filter_on and "Time (day)" in df.columns:
-    min_d = pd.to_datetime(df["Time (day)"]).min()
-    max_d = pd.to_datetime(df["Time (day)"]).max()
+if date_filter_on and "Time (day)" in df.columns and not df.empty:
+    min_d = df["Time (day)"].min()
+    max_d = df["Time (day)"].max()
     d1, d2 = st.slider(
         "ช่วงวันที่",
-        min_value=min_d.to_pydatetime().date(),
-        max_value=max_d.to_pydatetime().date(),
-        value=(min_d.to_pydatetime().date(), max_d.to_pydatetime().date()),
+        min_value=min_d,
+        max_value=max_d,
+        value=(min_d, max_d),
     )
-    mask = (pd.to_datetime(df["Time (day)"]) >= pd.to_datetime(d1)) & (
-        pd.to_datetime(df["Time (day)"]) <= pd.to_datetime(d2)
-    )
+    # Ensure comparison is between date objects
+    mask = (df["Time (day)"] >= d1) & (df["Time (day)"] <= d2)
     df = df.loc[mask].copy()
 
 if employee_search.strip():
@@ -436,7 +466,7 @@ emp_hourly, emp_daily, emp_summary = compute_aggregates(
 total_works = float(emp_daily["Works"].sum()) if not emp_daily.empty else 0.0
 total_hours = float(emp_daily["Hours"].sum()) if not emp_daily.empty else 0.0
 avg_wph = total_works / total_hours if total_hours > 0 else np.nan
-employees = emp_summary.shape[0]
+employees = emp_summary.shape[0] if not emp_summary.empty else 0
 days = emp_daily["Time (day)"].nunique() if "Time (day)" in emp_daily.columns else 0
 
 st.subheader("ภาพรวม")
@@ -518,7 +548,7 @@ with tab3:
     if emp_summary.empty:
         st.info("ไม่มีข้อมูลพนักงาน")
     else:
-        names = emp_summary["Name"].tolist()
+        names = sorted(emp_summary["Name"].unique().tolist())
         picked = st.selectbox("เลือกพนักงาน", options=names)
         if picked:
             # Determine the employee ID (in case of duplicate names, show all matches)
@@ -557,8 +587,8 @@ with tab3:
 
 with tab4:
     st.subheader("ข้อมูลผิดปกติ")
-    if emp_daily.empty:
-        st.info("ไม่มีข้อมูลสำหรับตรวจหาความผิดปกติ")
+    if emp_daily.empty or emp_daily.shape[0] < 2:
+        st.info("ไม่มีข้อมูลเพียงพอสำหรับตรวจหาความผิดปกติ")
     else:
         z_thr = st.slider("เกณฑ์ Z-score", 1.0, 4.0, 2.0, 0.5)
         anom = anomaly_report(emp_daily, z_threshold=z_thr)
