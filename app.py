@@ -28,7 +28,7 @@ st.set_page_config(
 # -----------------------------
 # Helpers
 # -----------------------------
-# These names are now assigned based on column position
+# These names are assigned based on column position for Performance Report
 REQUIRED_COLS = ["Time (day)", "Hour", "Employee ID", "Name", "Processed Count"]
 COLUMN_POSITION_MAPPING = {
     0: "Time (day)",
@@ -40,28 +40,28 @@ COLUMN_POSITION_MAPPING = {
 
 
 @st.cache_data(show_spinner=False)
-def read_csv_safely(file) -> pd.DataFrame:
-    """Robust CSV loader that reads by position, skipping the header row."""
+def read_csv_safely(file, by_position=True) -> pd.DataFrame:
+    """Robust CSV loader. Can read by position (skip header) or by header name."""
+    read_params = {'header': None, 'skiprows': 1} if by_position else {'header': 0}
+    
     for sep in [",", "\t", ";"]:
         for enc in ["utf-8", "utf-8-sig", "latin-1"]:
             try:
                 file.seek(0)
-                # Use header=None to read by position, skiprows=1 to skip original header
-                df = pd.read_csv(file, sep=sep, encoding=enc, header=None, skiprows=1)
+                df = pd.read_csv(file, sep=sep, encoding=enc, **read_params)
                 if df.shape[1] >= 3:
                     return df
             except Exception:
                 continue
     # Fallback to pandas default
     file.seek(0)
-    return pd.read_csv(file, header=None, skiprows=1)
+    return pd.read_csv(file, **read_params)
 
 
 def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, List[str]]:
-    """Ensure required columns exist and coerce dtypes, with improved date logic."""
+    """Cleans and validates the main performance data."""
     issues = []
     
-    # Filter out records where Name is "-"
     if "Name" in df.columns:
         df = df[df["Name"] != "-"].copy()
 
@@ -69,8 +69,12 @@ def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, L
     if missing:
         issues.append(f"Missing columns based on position: {missing}")
 
-    # --- FIXED Date Handling Logic ---
     if "Time (day)" in df.columns:
+        df.dropna(subset=["Time (day)"], inplace=True)
+        if df.empty:
+            issues.append("No valid data rows remained after removing rows with empty dates.")
+            return df, issues
+        
         reconstructed_from_filename = False
         
         day_numbers = pd.to_numeric(df["Time (day)"], errors='coerce')
@@ -97,11 +101,7 @@ def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, L
         if not reconstructed_from_filename:
             try:
                 processed_dates = pd.to_datetime(df["Time (day)"], errors="coerce")
-                if processed_dates.isna().all():
-                    issues.append("Failed to parse 'Time (day)' as dates.")
-                    df['Time (day)'] = pd.NaT
-                else:
-                    df['Time (day)'] = processed_dates
+                df['Time (day)'] = processed_dates
             except Exception as e:
                 issues.append(f"An error occurred while parsing dates: {e}")
                 df['Time (day)'] = pd.NaT
@@ -111,169 +111,146 @@ def coerce_schema(df: pd.DataFrame, filename: str = "") -> Tuple[pd.DataFrame, L
         else:
             df["Time (day)"] = pd.NaT
 
-    # Coerce Hour to int 0-23 where possible
     if "Hour" in df.columns:
         def _to_hour(x):
             try:
                 s = str(x).strip()
-                if ":" in s:
-                    s = s.split(":")[0]
+                if ":" in s: s = s.split(":")[0]
                 h = int(float(s))
-                if 0 <= h <= 23:
-                    return h
-            except Exception:
-                return np.nan
-            return np.nan
+                return h if 0 <= h <= 23 else np.nan
+            except Exception: return np.nan
         df["Hour"] = df["Hour"].apply(_to_hour)
 
-    # Employee ID as string
     if "Employee ID" in df.columns:
         df["Employee ID"] = df["Employee ID"].astype(str).str.replace(r'\.0$', '', regex=True)
 
-    # Name as string
     if "Name" in df.columns:
         df["Name"] = df["Name"].astype(str)
 
-    # Processed Count as numeric >= 0
     if "Processed Count" in df.columns:
-        df["Processed Count"] = pd.to_numeric(df["Processed Count"], errors="coerce")
-        neg = (df["Processed Count"] < 0).sum()
-        if neg > 0:
-            issues.append(f"{neg} rows had negative 'Processed Count' and were set to 0.")
-        df["Processed Count"] = df["Processed Count"].fillna(0)
-        df.loc[df["Processed Count"] < 0, "Processed Count"] = 0
+        df["Processed Count"] = pd.to_numeric(df["Processed Count"], errors="coerce").fillna(0)
+        neg_mask = df["Processed Count"] < 0
+        if neg_mask.any():
+            issues.append(f"{neg_mask.sum()} rows had negative 'Processed Count' and were set to 0.")
+            df.loc[neg_mask, "Processed Count"] = 0
 
     return df, issues
 
+# --- NEW FUNCTIONS FOR QA ANALYSIS ---
+def clean_percentage(series: pd.Series) -> pd.Series:
+    """Converts a series of percentage strings (e.g., '99.5%') to floats (e.g., 0.995)."""
+    series_str = series.astype(str).str.strip()
+    return pd.to_numeric(series_str.str.replace('%', ''), errors='coerce') / 100
+
+@st.cache_data(show_spinner=False)
+def process_qa_data(file) -> pd.DataFrame:
+    """Reads, cleans, and processes the QA accuracy report."""
+    try:
+        df = read_csv_safely(file, by_position=False)
+        if df.empty: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"ไม่สามารถอ่านไฟล์ QA ได้: {e}")
+        return pd.DataFrame()
+
+    # Forward-fill the 'Time (day)' column
+    df['Time (day)'].replace(r'^\s*$', np.nan, regex=True, inplace=True)
+    df['Time (day)'].ffill(inplace=True)
+
+    # Filter out summary rows or rows with missing identifiers
+    df.dropna(subset=['Employee ID', 'Name', 'Time (day)'], inplace=True)
+    df = df[df['Employee ID'] != '-'].copy()
+    
+    # Construct the full date from filename
+    filename = getattr(file, 'name', '')
+    match = re.search(r"(\d{4})-(\d{2})", filename)
+    if match:
+        year, month = match.groups()
+        day_col = pd.to_numeric(df["Time (day)"], errors='coerce')
+        df['Date'] = pd.to_datetime(
+            {'year': int(year), 'month': int(month), 'day': day_col},
+            errors='coerce'
+        ).dt.date
+    else:
+        df['Date'] = pd.NaT
+
+    df.dropna(subset=['Date'], inplace=True)
+    if df.empty: return pd.DataFrame()
+
+    # Clean the accuracy columns
+    accuracy_cols = ['Total Accuracy', 'Approved Accuracy', 'Declined Accuracy', 'Kenta Accuracy']
+    for col in accuracy_cols:
+        if col in df.columns:
+            df[col] = clean_percentage(df[col])
+            
+    # Select and return relevant columns
+    final_cols = ['Date', 'Employee ID', 'Name'] + [c for c in accuracy_cols if c in df.columns]
+    return df[final_cols]
+# --- END OF NEW FUNCTIONS ---
 
 def deduplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Combine duplicates by summing Processed Count within the same (day, hour, emp)."""
     key_cols = [c for c in ["Time (day)", "Hour", "Employee ID", "Name"] if c in df.columns]
-    if not key_cols or "Processed Count" not in df.columns:
-        return df
-    g = df.groupby(key_cols, dropna=False, as_index=False)["Processed Count"].sum()
-    return g
+    if not key_cols or "Processed Count" not in df.columns: return df
+    return df.groupby(key_cols, dropna=False, as_index=False)["Processed Count"].sum()
 
 
-def compute_aggregates(
-    df: pd.DataFrame,
-    count_hour_when_processed_gt_zero: bool = True,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Returns:
-        - emp_hourly: granular per (day, hour, emp)
-        - emp_daily: per (day, emp)
-        - emp_summary: per employee
-    """
+def compute_aggregates(df, count_hour_when_processed_gt_zero=True):
     df = df.copy()
-
     if "Hour" not in df.columns or "Time (day)" not in df.columns:
         st.warning("Cannot compute aggregates without 'Time (day)' and 'Hour' columns.")
         return df, df, df
 
-    if count_hour_when_processed_gt_zero:
-        worked_mask = df["Processed Count"] > 0
-    else:
-        worked_mask = ~df["Hour"].isna()
-
+    worked_mask = (df["Processed Count"] > 0) if count_hour_when_processed_gt_zero else ~df["Hour"].isna()
     df["WorkedHourFlag"] = worked_mask.astype(int)
 
     daily_keys = ["Time (day)", "Employee ID", "Name"]
-    emp_daily = (
-        df.groupby(daily_keys, dropna=False)
-        .agg(
-            Works=("Processed Count", "sum"),
-            Hours=("WorkedHourFlag", "sum"),
-            UniqueHours=("Hour", pd.Series.nunique),
-        )
-        .reset_index()
-    )
+    emp_daily = df.groupby(daily_keys, dropna=False).agg(
+        Works=("Processed Count", "sum"),
+        Hours=("WorkedHourFlag", "sum"),
+    ).reset_index()
     emp_daily["WPH"] = emp_daily["Works"] / emp_daily["Hours"].replace(0, np.nan)
 
-    emp_summary = (
-        emp_daily.groupby(["Employee ID", "Name"], dropna=False)
-        .agg(
-            Days=("Time (day)", pd.Series.nunique),
-            Hours=("Hours", "sum"),
-            UniqueHours=("UniqueHours", "sum"),
-            Works=("Works", "sum"),
-            AvgWPH=("WPH", "mean"),
-            MedianWPH=("WPH", "median"),
-            MaxDailyWorks=("Works", "max"),
-        )
-        .reset_index()
-    )
+    emp_summary = emp_daily.groupby(["Employee ID", "Name"], dropna=False).agg(
+        Days=("Time (day)", pd.Series.nunique),
+        Hours=("Hours", "sum"),
+        Works=("Works", "sum"),
+        AvgWPH=("WPH", "mean"),
+    ).reset_index()
     emp_summary["WPH"] = emp_summary["Works"] / emp_summary["Hours"].replace(0, np.nan)
-    emp_summary["WorksPerDay"] = emp_summary["Works"] / emp_summary["Days"].replace(0, np.nan)
-
-    emp_hourly = df.copy()
-
-    return emp_hourly, emp_daily, emp_summary
+    return df, emp_daily, emp_summary
 
 
 def zscore(series: pd.Series) -> pd.Series:
-    m = series.mean()
-    s = series.std(ddof=0)
-    if s == 0 or np.isnan(s):
-        return pd.Series([0] * len(series), index=series.index)
-    return (series - m) / s
+    m, s = series.mean(), series.std(ddof=0)
+    return ((series - m) / s) if s != 0 and not np.isnan(s) else pd.Series(0, index=series.index)
 
 
-def anomaly_report(emp_daily: pd.DataFrame, z_threshold: float = 2.0) -> pd.DataFrame:
-    """Compute z-score on per-employee daily Works to find spikes or dips."""
-    if emp_daily.empty:
-        return emp_daily
-
-    def _emp_anom(df_emp):
-        df_emp = df_emp.sort_values("Time (day)").copy()
-        df_emp["WorksZ"] = zscore(df_emp["Works"])
-        df_emp["IsAnomaly"] = df_emp["WorksZ"].abs() >= z_threshold
-        return df_emp
-
-    out = (
-        emp_daily.groupby(["Employee ID", "Name"], group_keys=False)
-        .apply(_emp_anom)
-        .reset_index(drop=True)
-    )
-    return out
+def anomaly_report(emp_daily: pd.DataFrame, z_threshold: float = 2.0):
+    if emp_daily.empty: return emp_daily
+    return emp_daily.groupby(["Employee ID", "Name"], group_keys=False).apply(
+        lambda g: g.assign(WorksZ=zscore(g["Works"])).assign(IsAnomaly=lambda x: x["WorksZ"].abs() >= z_threshold)
+    ).reset_index(drop=True)
 
 
-def heatmap_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return two pivot tables: throughput heatmap & staffing coverage heatmap."""
+def heatmap_data(df: pd.DataFrame):
     if df.empty or "Time (day)" not in df.columns or "Hour" not in df.columns:
         return pd.DataFrame(), pd.DataFrame()
-
     tmp = df.copy()
     tmp['Time (day)'] = pd.to_datetime(tmp['Time (day)'])
     tmp["Dow"] = tmp["Time (day)"].dt.day_name()
-
-    thr = (
-        tmp.groupby(["Dow", "Hour"])["Processed Count"]
-        .sum()
-        .reset_index()
-        .pivot(index="Dow", columns="Hour", values="Processed Count")
-        .fillna(0)
-    )
-
-    cov = (
-        tmp.groupby(["Dow", "Hour"])["Employee ID"]
-        .nunique()
-        .reset_index()
-        .pivot(index="Dow", columns="Hour", values="Employee ID")
-        .fillna(0)
-    )
     dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    thr = thr.reindex(dow_order).fillna(0)
-    cov = cov.reindex(dow_order).fillna(0)
+    
+    thr = tmp.pivot_table(index="Dow", columns="Hour", values="Processed Count", aggfunc="sum").reindex(dow_order).fillna(0)
+    cov = tmp.pivot_table(index="Dow", columns="Hour", values="Employee ID", aggfunc="nunique").reindex(dow_order).fillna(0)
     return thr, cov
 
 
-def add_topn_bar(df: pd.DataFrame, metric: str, top_n: int, title: str):
+def add_topn_bar(df: pd.DataFrame, metric: str, top_n: int, title: str, ascending=False, format_spec=None):
     if df.empty or metric not in df.columns:
         st.info("ไม่มีข้อมูลที่จะแสดง")
         return
-    show = df.dropna(subset=[metric]).sort_values(metric, ascending=False).head(top_n)
-    fig = px.bar(show, x="Name", y=metric, hover_data=["Employee ID"], title=title)
+    show = df.dropna(subset=[metric]).sort_values(metric, ascending=ascending).head(top_n)
+    fig = px.bar(show, x="Name", y=metric, hover_data=["Employee ID"], title=title, text_auto=format_spec)
+    fig.update_traces(textangle=0, textposition="outside")
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(show.reset_index(drop=True))
 
@@ -287,7 +264,7 @@ def kpi_block(total_works, total_hours, avg_wph, employees, days):
     c5.metric("จำนวนวัน", f"{days:,}")
 
 
-def download_csv_button(df: pd.DataFrame, filename: str, label: str):
+def download_csv_button(df, filename, label):
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(label=label, data=csv, file_name=filename, mime="text/csv")
 
@@ -297,299 +274,176 @@ def download_csv_button(df: pd.DataFrame, filename: str, label: str):
 # -----------------------------
 st.title("📈 เครื่องมือประเมินประสิทธิภาพ")
 
-st.markdown(
-    """
+st.markdown("""
 อัปโหลดไฟล์ CSV 1 ไฟล์หรือมากกว่า โดยข้อมูลต้องเรียงตามลำดับดังนี้:
 - **คอลัมน์ที่ 1**: Time (day) (วันที่ของเดือน, เช่น 1, 2, ..., 31)
 - **คอลัมน์ที่ 2**: Hour (ชั่วโมง, เช่น 9:00, 13:00)
 - **คอลัมน์ที่ 3**: Employee ID (รหัสพนักงาน)
 - **คอลัมน์ที่ 4**: Name (ชื่อพนักงาน)
 - **คอลัมน์ที่ 5**: Processed Count (จำนวนงานที่ทำ)
-
 **หมายเหตุ:** แอปจะข้ามแถวแรก (header) และอ่านข้อมูลตามลำดับคอลัมน์ที่กำหนดไว้เท่านั้น
-"""
-)
+""")
 
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
-    st.caption("จะนับชั่วโมงทำงานอย่างไร?")
-    hour_count_mode = st.radio(
-        "นับชั่วโมงเมื่อ…",
-        options=[
-            "มีข้อมูล Processed Count > 0 (แนะนำ)",
-            "มีแถวข้อมูลอยู่ (แม้ Processed Count = 0)",
-        ],
-        index=0,
-    )
+    st.caption("How to count a worked hour?")
+    hour_count_mode = st.radio("นับชั่วโมงเมื่อ…", ["มีข้อมูล Processed Count > 0 (แนะนำ)", "มีแถวข้อมูลอยู่ (แม้ Processed Count = 0)"])
     count_when_gt_zero = hour_count_mode.startswith("มีข้อมูล")
-
-    min_hours_threshold = st.slider("ชั่วโมงทำงานขั้นต่ำเพื่อแสดงในลีดเดอร์บอร์ด WPH", 1, 40, 8, 1)
+    min_hours_threshold = st.slider("ชั่วโมงทำงานขั้นต่ำสำหรับ WPH", 1, 40, 8, 1)
     top_n = st.slider("จำนวนอันดับสูงสุดที่จะแสดง", 3, 50, 10, 1)
-
     st.divider()
     st.caption("ตัวกรอง (เลือกได้)")
     date_filter_on = st.checkbox("กรองตามช่วงวันที่", value=False)
     employee_search = st.text_input("ค้นหาชื่อพนักงาน (ไม่บังคับ)", value="")
-
     st.divider()
     st.caption("ตัวเลือกข้อมูล")
     use_sample = st.checkbox("ใช้ข้อมูลตัวอย่าง (หากยังไม่มีไฟล์)", value=False)
 
-
 # -----------------------------
-# Load data
+# Load Performance Data
 # -----------------------------
-uploaded_files = st.file_uploader(
-    "วางไฟล์ CSV ที่นี่",
-    type=["csv"],
-    accept_multiple_files=True,
-)
-
-dfs = []
-issues_all = []
+st.header("1. Performance Report (ปริมาณงาน)")
+uploaded_files = st.file_uploader("วางไฟล์ Performance Report ที่นี่", type=["csv"], accept_multiple_files=True)
+dfs, issues_all = [], []
 
 if use_sample and not uploaded_files:
     rng = np.random.default_rng(42)
     dates = pd.date_range("2025-08-01", periods=10, freq="D").date
-    hours = list(range(9, 19))
-    employees = [("E001", "Alice"), ("E002", "Bob"), ("E003", "Chai"), ("E004", "Dao")]
-    rows = []
-    for d in dates:
-        for h in hours:
-            for eid, nm in employees:
-                if rng.random() < 0.8: cnt = int(rng.poisson(8))
-                else: cnt = 0
-                rows.append([d, h, eid, nm, cnt])
-    
-    sample = pd.DataFrame(rows) # Create DF without headers
-    # Manually assign names for sample data to match the new flow
-    sample.rename(columns=COLUMN_POSITION_MAPPING, inplace=True)
-    df0, issues = coerce_schema(sample, filename="sample-2025-08.csv")
-    df0 = deduplicate_rows(df0)
-    dfs.append(df0)
-    issues_all += issues
+    rows = [[d, h, eid, nm, int(rng.poisson(8)) if rng.random() < 0.8 else 0]
+            for d in dates for h in range(9, 19) for eid, nm in [("E001", "Alice"), ("E002", "Bob"), ("E003", "Chai"), ("E004", "Dao")]]
+    sample = pd.DataFrame(rows).rename(columns=COLUMN_POSITION_MAPPING)
+    df0, issues = coerce_schema(sample, "sample-2025-08.csv")
+    dfs.append(deduplicate_rows(df0)); issues_all.extend(issues)
 
-for f in uploaded_files or []:
+for f in uploaded_files:
     try:
-        raw = read_csv_safely(f)
-        filename = getattr(f, 'name', '')
-        
-        # Rename columns based on position
-        rename_dict = {k: v for k, v in COLUMN_POSITION_MAPPING.items() if k in raw.columns}
-        raw = raw.rename(columns=rename_dict)
-        
-        df0, issues = coerce_schema(raw, filename=filename)
-        df0 = deduplicate_rows(df0)
-        dfs.append(df0)
-        issues_all += issues
+        raw = read_csv_safely(f, by_position=True)
+        raw = raw.rename(columns={k: v for k, v in COLUMN_POSITION_MAPPING.items() if k in raw.columns})
+        df0, issues = coerce_schema(raw, getattr(f, 'name', ''))
+        dfs.append(deduplicate_rows(df0)); issues_all.extend(issues)
     except Exception as e:
         st.error(f"ไม่สามารถอ่านไฟล์ {getattr(f, 'name', 'file')}: {e}")
 
 if not dfs:
-    st.info("👆 อัปโหลดไฟล์ CSV หรือเปิดใช้งาน **ใช้ข้อมูลตัวอย่าง** ในแถบด้านข้างเพื่อเริ่มต้น")
+    st.info("👆 อัปโหลดไฟล์ Performance Report หรือเปิดใช้งาน **ใช้ข้อมูลตัวอย่าง** ในแถบด้านข้างเพื่อเริ่มต้น")
     st.stop()
 
 df = pd.concat(dfs, ignore_index=True)
-
 if issues_all:
-    with st.expander("ข้อสังเกตเกี่ยวกับคุณภาพข้อมูล"):
-        for msg in set(issues_all):
-            st.warning(msg)
-
-missing_cols = [c for c in REQUIRED_COLS if c not in df.columns]
-if missing_cols:
-    st.error(f"ไม่สามารถดำเนินการต่อได้: ไม่มีคอลัมน์ที่จำเป็นตามลำดับที่ถูกต้อง")
-    st.stop()
+    with st.expander("ข้อสังเกตเกี่ยวกับคุณภาพข้อมูล Performance"):
+        st.warning("\n".join(set(issues_all)))
 
 df.dropna(subset=['Time (day)'], inplace=True)
-
 if df.empty:
-    st.error("ไม่มีข้อมูลที่ถูกต้องเหลืออยู่หลังจากการประมวลผล โปรดตรวจสอบไฟล์ของคุณ")
-    st.stop()
+    st.error("ไม่มีข้อมูล Performance ที่ถูกต้องเหลืออยู่หลังจากการประมวลผล โปรดตรวจสอบไฟล์ของคุณ"); st.stop()
 
-if date_filter_on and "Time (day)" in df.columns and not df.empty:
-    min_d = df["Time (day)"].min()
-    max_d = df["Time (day)"].max()
-    d1, d2 = st.slider(
-        "ช่วงวันที่",
-        min_value=min_d,
-        max_value=max_d,
-        value=(min_d, max_d),
-    )
-    mask = (df["Time (day)"] >= d1) & (df["Time (day)"] <= d2)
-    df = df.loc[mask].copy()
+# Main App Logic
+if date_filter_on:
+    min_d, max_d = df["Time (day)"].min(), df["Time (day)"].max()
+    d1, d2 = st.slider("ช่วงวันที่", min_d, max_d, (min_d, max_d))
+    df = df[df["Time (day)"].between(d1, d2)].copy()
 
 if employee_search.strip():
-    mask = df["Name"].str.contains(employee_search.strip(), case=False, na=False)
-    df = df.loc[mask].copy()
+    df = df[df["Name"].str.contains(employee_search.strip(), case=False, na=False)].copy()
 
-emp_hourly, emp_daily, emp_summary = compute_aggregates(
-    df, count_hour_when_processed_gt_zero=count_when_gt_zero
-)
-
-total_works = float(emp_daily["Works"].sum()) if not emp_daily.empty else 0.0
-total_hours = float(emp_daily["Hours"].sum()) if not emp_daily.empty else 0.0
+emp_hourly, emp_daily, emp_summary = compute_aggregates(df, count_when_gt_zero)
+total_works, total_hours = emp_daily["Works"].sum(), emp_daily["Hours"].sum()
 avg_wph = total_works / total_hours if total_hours > 0 else np.nan
-employees = emp_summary.shape[0] if not emp_summary.empty else 0
-days = emp_daily["Time (day)"].nunique() if "Time (day)" in emp_daily.columns else 0
+employees, days = emp_summary.shape[0], emp_daily["Time (day)"].nunique()
 
-st.subheader("ภาพรวม")
+st.subheader("ภาพรวม Performance")
 kpi_block(total_works, total_hours, avg_wph, employees, days)
 
-with st.expander("ตัวอย่างข้อมูลดิบ (หลังการแปลง)", expanded=False):
-    st.dataframe(df.head(100))
-
-st.divider()
-
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    ["🏆 ลีดเดอร์บอร์ด", "📅 การวิเคราะห์ตามเวลา", "👤 ข้อมูลพนักงานรายบุคคล", "⚠️ ข้อมูลผิดปกติ", "📊 ตารางสรุป (Pivot)", "📥 ส่งออกข้อมูล"]
+# -----------------------------
+# Tabs
+# -----------------------------
+tab_perf, tab_time, tab_drill, tab_anom, tab_pivot, tab_qa, tab_export = st.tabs(
+    ["🏆 Leaderboards", "📅 Time Analysis", "👤 Employee Drilldown", "⚠️ Anomalies", "📊 Pivots", "🎯 วิเคราะห์ความแม่นยำ", "📥 Export"]
 )
 
-with tab1:
-    st.subheader("ลีดเดอร์บอร์ด")
+with tab_perf:
+    st.subheader("Leaderboards")
     st.caption(f"ใช้เกณฑ์ชั่วโมงทำงานขั้นต่ำ **{min_hours_threshold}** ชั่วโมงสำหรับ WPH")
     if not emp_summary.empty:
         eligible = emp_summary[emp_summary["Hours"] >= min_hours_threshold].copy()
-        col1, col2, col3 = st.columns(3, gap="large")
-        with col1:
-            add_topn_bar(emp_summary, "Works", top_n, "อันดับสูงสุดตามจำนวนงานทั้งหมด")
-        with col2:
-            if eligible.empty:
-                st.info("ไม่มีพนักงานที่ผ่านเกณฑ์ชั่วโมงทำงานขั้นต่ำสำหรับการจัดอันดับ WPH")
-            else:
-                add_topn_bar(eligible, "WPH", top_n, "อันดับสูงสุดตามงานต่อชั่วโมง (WPH)")
-        with col3:
-            add_topn_bar(emp_summary, "Hours", top_n, "อันดับสูงสุดตามชั่วโมงทำงาน")
+        c1, c2, c3 = st.columns(3, gap="large")
+        with c1: add_topn_bar(emp_summary, "Works", top_n, "Top by Works (Total Processed)")
+        with c2:
+            if eligible.empty: st.info("ไม่มีพนักงานผ่านเกณฑ์สำหรับ WPH ranking")
+            else: add_topn_bar(eligible, "WPH", top_n, "Top by Works per Hour (WPH)")
+        with c3: add_topn_bar(emp_summary, "Hours", top_n, "Top by Hours Worked")
 
-        st.markdown("---")
-        st.subheader("อันดับต่ำสุดตาม WPH (ตามเกณฑ์ชั่วโมงทำงานขั้นต่ำ)")
-        if not eligible.empty:
-            bottom = eligible.sort_values("WPH", ascending=True).head(top_n)
-            fig = px.bar(bottom, x="Name", y="WPH", hover_data=["Employee ID"], title="อันดับต่ำสุดตาม WPH")
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(bottom.reset_index(drop=True))
-        else:
-            st.info("ไม่มีพนักงานที่เข้าเกณฑ์สำหรับอันดับต่ำสุดตาม WPH")
-
-with tab2:
-    st.subheader("การวิเคราะห์ตามเวลา")
-    if emp_hourly.empty:
-        st.info("ข้อมูลไม่เพียงพอสำหรับการวิเคราะห์ตามเวลา")
+with tab_time:
+    st.subheader("Time Analysis")
+    if emp_hourly.empty: st.info("Not enough data")
     else:
-        hourly = emp_hourly.groupby("Hour", as_index=False)["Processed Count"].sum()
-        fig1 = px.line(hourly, x="Hour", y="Processed Count", markers=True, title="ปริมาณงานในแต่ละชั่วโมงของวัน")
+        fig1 = px.line(emp_hourly.groupby("Hour", as_index=False)["Processed Count"].sum(), x="Hour", y="Processed Count", markers=True, title="Throughput by Hour of Day")
         st.plotly_chart(fig1, use_container_width=True)
-
         thr, cov = heatmap_data(emp_hourly)
         if not thr.empty:
-            st.markdown("**แผนที่ความร้อนของปริมาณงาน (วันในสัปดาห์ × ชั่วโมง)**")
-            fig2 = px.imshow(thr, aspect="auto", title="แผนที่ความร้อนของปริมาณงาน", labels=dict(color="จำนวนงาน"))
+            st.markdown("**Throughput Heatmap (Day × Hour)**")
+            fig2 = px.imshow(thr, aspect="auto", title="Throughput", labels=dict(color="Works"))
             st.plotly_chart(fig2, use_container_width=True)
 
-        if not cov.empty:
-            st.markdown("**แผนที่ความร้อนของการเข้าทำงาน (จำนวนพนักงานที่ไม่ซ้ำกัน)**")
-            fig3 = px.imshow(cov, aspect="auto", title="แผนที่ความร้อนของการเข้าทำงาน", labels=dict(color="จำนวนพนักงาน"))
-            st.plotly_chart(fig3, use_container_width=True)
-
-        daily_total = emp_daily.groupby("Time (day)", as_index=False)["Works"].sum()
-        fig4 = px.bar(daily_total, x="Time (day)", y="Works", title="ยอดรวมงานรายวัน")
-        st.plotly_chart(fig4, use_container_width=True)
-
-        st.markdown("**ชั่วโมงที่มีปริมาณงานสูงสุด**")
-        peak_hours = (
-            emp_hourly.groupby("Hour", as_index=False)["Processed Count"].sum().sort_values("Processed Count", ascending=False)
-        )
-        st.dataframe(peak_hours.head(24))
-
-with tab3:
-    st.subheader("ข้อมูลพนักงานรายบุคคล")
-    if emp_summary.empty:
-        st.info("ไม่มีข้อมูลพนักงาน")
+with tab_drill:
+    st.subheader("Employee Drilldown")
+    if emp_summary.empty: st.info("No employee data")
     else:
         names = sorted(emp_summary["Name"].unique().tolist())
         picked = st.selectbox("เลือกพนักงาน", options=names)
         if picked:
-            emp_ids = emp_summary.loc[emp_summary["Name"] == picked, "Employee ID"].unique().tolist()
-            if len(emp_ids) > 1:
-                emp_id = st.selectbox("พบหลาย ID สำหรับชื่อนี้ กรุณาเลือกหนึ่งรายการ:", options=emp_ids)
-            else:
-                emp_id = emp_ids[0]
-
+            emp_ids = emp_summary.loc[emp_summary["Name"] == picked, "Employee ID"].unique()
+            emp_id = st.selectbox("Multiple IDs found, pick one:", options=emp_ids) if len(emp_ids) > 1 else emp_ids[0]
             dfd = emp_daily[(emp_daily["Name"] == picked) & (emp_daily["Employee ID"] == emp_id)].copy()
-            if dfd.empty:
-                st.info("ไม่พบข้อมูลรายวันสำหรับพนักงานที่เลือก")
-            else:
-                c1, c2, c3 = st.columns(3)
-                works_total = int(dfd["Works"].sum())
-                hours_total = int(dfd["Hours"].sum())
-                wph = works_total / hours_total if hours_total > 0 else np.nan
-                c1.metric("งานทั้งหมด", f"{works_total:,}")
-                c2.metric("ชั่วโมงทั้งหมด", f"{hours_total:,}")
-                c3.metric("WPH (โดยรวม)", f"{wph:,.2f}" if not np.isnan(wph) else "—")
-
-                fig = px.line(dfd, x="Time (day)", y="Works", markers=True, title=f"ปริมาณงานรายวัน — {picked}")
+            if not dfd.empty:
+                w, h = dfd["Works"].sum(), dfd["Hours"].sum()
+                c1, c2, c3 = st.columns(3); c1.metric("Works", f"{w:,}"); c2.metric("Hours", f"{h:,}"); c3.metric("WPH", f"{(w/h if h>0 else 0):,.2f}")
+                fig = px.line(dfd, x="Time (day)", y="Works", markers=True, title=f"Daily Works — {picked}")
                 st.plotly_chart(fig, use_container_width=True)
-
-                fig_wph = px.line(dfd, x="Time (day)", y="WPH", markers=True, title=f"WPH รายวัน — {picked}")
-                st.plotly_chart(fig_wph, use_container_width=True)
-
-                base = emp_hourly[(emp_hourly["Name"] == picked) & (emp_hourly["Employee ID"] == emp_id)].copy()
-                prof = base.groupby("Hour", as_index=False)["Processed Count"].sum()
-                fig_prof = px.bar(prof, x="Hour", y="Processed Count", title=f"โปรไฟล์รายชั่วโมง — {picked}")
-                st.plotly_chart(fig_prof, use_container_width=True)
-
-                st.markdown("**บันทึกข้อมูล (รายวัน)**")
-                st.dataframe(dfd.sort_values("Time (day)"))
-
-with tab4:
-    st.subheader("ข้อมูลผิดปกติ")
-    if emp_daily.empty or emp_daily.shape[0] < 2:
-        st.info("ไม่มีข้อมูลเพียงพอสำหรับตรวจหาความผิดปกติ")
+                
+with tab_anom:
+    st.subheader("Anomalies")
+    if emp_daily.empty or emp_daily.shape[0] < 2: st.info("No data for anomaly detection.")
     else:
-        z_thr = st.slider("เกณฑ์ Z-score", 1.0, 4.0, 2.0, 0.5)
-        anom = anomaly_report(emp_daily, z_threshold=z_thr)
+        z_thr = st.slider("Z-score threshold", 1.0, 4.0, 2.0, 0.5)
+        anom = anomaly_report(emp_daily, z_thr)
         flagged = anom[anom["IsAnomaly"]].copy()
-        st.caption("ข้อมูลผิดปกติคือวันที่ 'จำนวนงาน' ประจำวันของพนักงานเบี่ยงเบนไปจากค่าเฉลี่ยของตนเอง มากกว่าหรือเท่ากับค่า Z-score ที่กำหนด")
+        st.caption("An anomaly is a day where an employee's daily 'Works' deviates from their own mean.")
         st.dataframe(flagged.sort_values(["Name", "Time (day)"]))
-        if not flagged.empty:
-            by_emp = flagged.groupby("Name").size().reset_index(name="Anomaly Days")
-            fig = px.bar(by_emp, x="Name", y="Anomaly Days", title="จำนวนวันที่ผิดปกติของพนักงานแต่ละคน")
-            st.plotly_chart(fig, use_container_width=True)
 
-with tab5:
-    st.subheader("ตารางสรุป (Pivot)")
-    if emp_hourly.empty:
-        st.info("ไม่มีข้อมูลสำหรับสร้างตารางสรุป")
+with tab_pivot:
+    st.subheader("Pivots")
+    if not emp_hourly.empty:
+        piv = emp_hourly.pivot_table(index="Time (day)", columns="Name", values="Processed Count", aggfunc="sum").fillna(0)
+        st.markdown("**Daily × Employee — Works**"); st.dataframe(piv)
+
+with tab_qa:
+    st.subheader("🎯 วิเคราะห์ความแม่นยำ (QA Accuracy)")
+    qa_file = st.file_uploader("วางไฟล์ QA Report ที่นี่", type=["csv"])
+
+    if qa_file:
+        qa_df = process_qa_data(qa_file)
+        if not qa_df.empty:
+            st.metric("ค่าเฉลี่ย Total Accuracy โดยรวม", f"{qa_df['Total Accuracy'].mean():.2%}")
+            
+            # Leaderboard for Accuracy
+            acc_summary = qa_df.groupby(["Employee ID", "Name"], as_index=False)["Total Accuracy"].mean()
+            add_topn_bar(acc_summary, "Total Accuracy", top_n, "Top by Average Total Accuracy", format_spec='.2%')
+            
+            with st.expander("ดูข้อมูล QA ที่คลีนแล้ว"):
+                st.dataframe(qa_df)
+        else:
+            st.warning("ไม่พบข้อมูลที่ถูกต้องในไฟล์ QA หรือไม่สามารถประมวลผลไฟล์ได้")
     else:
-        piv = (
-            emp_hourly.groupby(["Time (day)", "Employee ID", "Name"], as_index=False)["Processed Count"].sum()
-            .pivot_table(index="Time (day)", columns="Name", values="Processed Count", aggfunc="sum")
-            .fillna(0)
-        )
-        st.markdown("**รายวัน × พนักงาน — จำนวนงาน**")
-        st.dataframe(piv)
+        st.info("อัปโหลดไฟล์ QA Report เพื่อเริ่มต้นการวิเคราะห์ความแม่นยำ")
 
-        piv2 = (
-            emp_hourly.groupby(["Hour", "Employee ID", "Name"], as_index=False)["Processed Count"].sum()
-            .pivot_table(index="Hour", columns="Name", values="Processed Count", aggfunc="sum")
-            .fillna(0)
-        )
-        st.markdown("**รายชั่วโมง × พนักงาน — จำนวนงาน**")
-        st.dataframe(piv2)
 
-with tab6:
-    st.subheader("ส่งออกข้อมูล")
-    st.caption("ดาวน์โหลดตารางสรุปเป็นไฟล์ CSV")
-
+with tab_export:
+    st.subheader("Export Data")
     c1, c2, c3 = st.columns(3)
-    with c1:
-        download_csv_button(emp_summary, "employee_summary.csv", "⬇️ สรุปข้อมูลพนักงาน (รายบุคคล)")
-    with c2:
-        download_csv_button(emp_daily, "employee_daily.csv", "⬇️ สรุปข้อมูลรายวัน (รายบุคคลต่อวัน)")
-    with c3:
-        download_csv_button(emp_hourly, "employee_hourly.csv", "⬇️ บันทึกข้อมูลรายชั่วโมง")
-
-    st.markdown("---")
-    st.markdown("**เคล็ดลับ:** จัดเก็บไฟล์ CSV เหล่านี้เพื่อการตรวจสอบและสรุปผลประจำเดือน")
+    with c1: download_csv_button(emp_summary, "employee_summary.csv", "⬇️ Employee Summary")
+    with c2: download_csv_button(emp_daily, "employee_daily.csv", "⬇️ Daily Aggregates")
+    with c3: download_csv_button(emp_hourly, "employee_hourly.csv", "⬇️ Granular Hourly Records")
+    with st.expander("Raw data preview"): st.dataframe(df.head(100))
 
 st.caption("สร้างด้วย ❤️ — สามารถวางไฟล์ CSV เพิ่มเติมได้ตลอดเวลาเพื่อรีเฟรชแดชบอร์ด")
